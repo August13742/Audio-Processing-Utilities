@@ -31,35 +31,45 @@ class TranscriptionEngine:
                 compute_type=self.compute_type
             )
 
-    def transcribe(self, audio_path: str, beam_size: int = 5) -> Tuple[str, Dict]:
+    def transcribe(self, audio_path: str, return_timestamps: bool = True) -> Tuple[str, Dict]:
         """
-        Transcribes audio file.
-        Returns (text, metadata).
+        Transcribes audio file using Faster-Whisper.
+        Returns (text, metadata) where metadata includes word-level timestamps.
         """
         self._ensure_model()
         
         try:
+            # More forgiving parameters for song transcription
             segments, info = self.model.transcribe(
                 audio_path, 
-                beam_size=beam_size,
-                vad_filter=True, # Built-in VAD is useful
-                vad_parameters=dict(min_silence_duration_ms=500)
+                word_timestamps=return_timestamps,
+                vad_filter=False, # Disable VAD to avoid cutting singing
+                no_speech_threshold=0.8, # More forgiving than default 0.6
+                compression_ratio_threshold=2.8, # More forgiving
+                condition_on_previous_text=False, # Don't rely on early segments for songs
             )
             
             texts = []
-            logprobs = []
+            words = []
             
             for segment in segments:
                 texts.append(segment.text)
-                logprobs.append(segment.avg_logprob)
+                if return_timestamps and segment.words:
+                    for w in segment.words:
+                        words.append({
+                            "word": w.word,
+                            "start": w.start,
+                            "end": w.end,
+                            "probability": w.probability
+                        })
                 
-            full_text = " ".join(texts).strip()
+            full_text = "".join(texts).strip() # Joined for Japanese
             
             metadata = {
                 "language": info.language,
                 "language_probability": info.language_probability,
                 "duration": info.duration,
-                "avg_logprob": float(np.mean(logprobs)) if logprobs else -99.0
+                "timestamps": words
             }
             
             return full_text, metadata

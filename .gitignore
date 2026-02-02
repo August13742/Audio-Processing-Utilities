@@ -12,3 +12,4 @@ wheels/
 /models/
 /checkpoints/
 /Test*/
+/Qwen3-ForcedAligner-0.6B/

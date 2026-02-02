@@ -11,6 +11,7 @@ from tools.cleaning import CleaningEngine
 from tools.segmentation import Segmenter
 from tools.converters import AudioConverter
 from tools.analysis import AudioAnalyzer
+from tools.karaoke import KaraokePipeline
 
 # === COMMAND IMPLEMENTATIONS ===
 
@@ -90,6 +91,11 @@ def cmd_stems(args):
         for f in in_path.glob("*.wav"): # Simple glob
              engine.separate_stems(str(f), args.output_dir)
 
+def cmd_karaoke(args):
+    print(f"[CMD] Starting Hybrid Karaoke Pipeline for {args.input}")
+    pipeline = KaraokePipeline(device=args.device)
+    pipeline.process_song(args.input, args.output_dir)
+
 def main():
     parser = argparse.ArgumentParser(description="Ultra Audio Toolkit")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -136,6 +142,12 @@ def main():
     p_stem.add_argument("input", help="Input file/dir")
     p_stem.add_argument("output_dir", help="Output directory")
     p_stem.set_defaults(func=cmd_stems)
+
+    # 7. Karaoke
+    p_kara = subparsers.add_parser("karaoke", parents=[gen_parser], help="Hybrid Karaoke Pipeline (Sep -> Whisper -> Qwen)")
+    p_kara.add_argument("input", help="Input file")
+    p_kara.add_argument("output_dir", help="Output directory")
+    p_kara.set_defaults(func=cmd_karaoke)
 
     args = parser.parse_args()
     args.func(args)

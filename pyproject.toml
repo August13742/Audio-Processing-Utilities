@@ -13,8 +13,10 @@ dependencies = [
     "torchvision==0.25.0.dev20260131+cu128",
     "audio-separator>=0.40.0",
     "onnxruntime-gpu>=1.23.2",
-    "huggingface-hub>=1.2.3",
-    "faster-whisper>=1.2.1",
+    "huggingface-hub",
+    "hf_transfer>=0.1.0",
+    "qwen-asr",
+    "faster-whisper>=1.0.0",
     "torchfcpe>=0.0.4",
     "speechbrain>=1.0.1",
     "pyloudnorm>=0.1.1",
@@ -41,3 +43,5 @@ torchvision = { index = "pytorch-cu128" }
 
 [tool.uv]
 prerelease = "allow"
+
+

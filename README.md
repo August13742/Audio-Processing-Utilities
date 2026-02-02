@@ -1,4 +1,4 @@
-# Rhythm Engine - Vocal Processing Toolkit
+# Vocal Processing Toolkit
 
 A comprehensive audio processing toolkit for separating, transcribing, and building vocal datasets.
 Powered by BS-Roformer, Mel-Band Roformer, Faster-Whisper, and Audio-Separator.
