@@ -3,6 +3,7 @@ import os
 import shutil
 from pathlib import Path
 from huggingface_hub import hf_hub_download
+from utils.log import log
 
 def ensure_models(model_dir: Path, verbose: bool = False):
     """
@@ -22,14 +23,14 @@ def ensure_models(model_dir: Path, verbose: bool = False):
     }
 
     if verbose:
-        print(f"[MODELS] Checking models in {model_dir}...")
+        log(f"[MODELS] Checking models in {model_dir}...")
 
     # Download BS-Roformer
     for remote, local in rofo_files.items():
         target = model_dir / local
         if not target.exists():
             try:
-                if verbose: print(f"  [DL] Downloading {remote}...")
+                if verbose: log(f"  [DL] Downloading {remote}...")
                 hf_hub_download(repo_id="jarredou/BS-ROFO-SW-Fixed", filename=remote, local_dir=model_dir, local_dir_use_symlinks=False)
                 
                 # Handle renaming if HF doesn't save to the exact local name we want
@@ -37,15 +38,15 @@ def ensure_models(model_dir: Path, verbose: bool = False):
                 if downloaded.exists() and downloaded != target:
                     os.rename(downloaded, target)
             except Exception as e:
-                print(f"  [ERR] Failed to download {remote}: {e}")
+                log(f"  [ERR] Failed to download {remote}: {e}")
 
     # Download Viperx
     for remote, local in viper_files.items():
         target = model_dir / local
         if not target.exists():
             try:
-                if verbose: print(f"  [DL] Downloading {remote}...")
+                if verbose: log(f"  [DL] Downloading {remote}...")
                 hf_hub_download(repo_id="jarredou/Mel-Band-Roformer-Karaoke-Aufr33-Viperx", filename=remote, local_dir=model_dir, local_dir_use_symlinks=False)
                 # Viperx repo usually saves as the long filename, so less renamed needed, but good to check
             except Exception as e:
-                print(f"  [ERR] Failed to download {remote}: {e}")
+                log(f"  [ERR] Failed to download {remote}: {e}")

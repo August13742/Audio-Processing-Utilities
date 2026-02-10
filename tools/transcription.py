@@ -4,6 +4,7 @@ import torch
 from pathlib import Path
 from typing import Optional, Dict, Tuple
 import numpy as np
+from utils.log import log
 
 try:
     from faster_whisper import WhisperModel
@@ -23,7 +24,7 @@ class TranscriptionEngine:
     def _ensure_model(self):
         if self.model is None:
             device_str = "cuda" if "cuda" in self.device else "cpu"
-            print(f"[ASR] Loading Faster-Whisper ({self.model_size}) on {device_str}...")
+            log(f"[ASR] Loading Faster-Whisper ({self.model_size}) on {device_str}...")
             # Automatically handles downloading
             self.model = WhisperModel(
                 self.model_size, 
@@ -82,5 +83,5 @@ class TranscriptionEngine:
             return full_text, metadata
             
         except Exception as e:
-            print(f"[ERR] Transcription failed used {audio_path}: {e}")
+            log(f"[ERR] Transcription failed used {audio_path}: {e}")
             return "", {}

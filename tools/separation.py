@@ -9,6 +9,7 @@ import numpy as np
 from audio_separator.separator import Separator
 from utils.models import ensure_models
 from utils.audio import load_audio, save_audio
+from utils.log import log
 
 class SeparationEngine:
     def __init__(self, model_dir: str = "models", device: str = "cuda", verbose: bool = False):
@@ -33,7 +34,7 @@ class SeparationEngine:
         temp_dir.mkdir(exist_ok=True)
 
         try:
-            if self.verbose: print(f"[SEP] Separating Vocals/Inst for {fname}...")
+            if self.verbose: log(f"[SEP] Separating Vocals/Inst for {fname}...")
 
             sep = Separator(
                 output_dir=str(temp_dir),
@@ -64,7 +65,7 @@ class SeparationEngine:
             inst_path = None
 
             if bgm_stems:
-                if self.verbose: print(f"  [MIX] Combining {len(bgm_stems)} stems for instrumental...")
+                if self.verbose: log(f"  [MIX] Combining {len(bgm_stems)} stems for instrumental...")
                 y_ref, sr = load_audio(str(bgm_stems[0]))
                 y_sum = y_ref.clone()
 
@@ -80,7 +81,7 @@ class SeparationEngine:
             return vocals_path, inst_path
 
         except Exception as e:
-            print(f"[ERR] Separation failed: {e}")
+            log(f"[ERR] Separation failed: {e}")
             return None, None
         finally:
             if temp_dir.exists():
@@ -94,7 +95,7 @@ class SeparationEngine:
         out_path = Path(output_dir) / fname
         out_path.mkdir(parents=True, exist_ok=True)
         
-        if self.verbose: print(f"[SEP] 6-Stem Separation for {fname}...")
+        if self.verbose: log(f"[SEP] 6-Stem Separation for {fname}...")
         
         try:
             sep = Separator(
@@ -107,7 +108,7 @@ class SeparationEngine:
             sep.separate(input_path)
             return str(out_path)
         except Exception as e:
-            print(f"[ERR] Stems separation failed: {e}")
+            log(f"[ERR] Stems separation failed: {e}")
             return None
 
     def separate_karaoke(self, input_path: str, output_dir: str) -> Tuple[Optional[str], Optional[str]]:
@@ -125,7 +126,7 @@ class SeparationEngine:
         temp_dir.mkdir(exist_ok=True)
 
         try:
-            if self.verbose: print(f"[SEP] Karaoke 2-stem separation for {fname}...")
+            if self.verbose: log(f"[SEP] Karaoke 2-stem separation for {fname}...")
 
             sep = Separator(
                 output_dir=str(temp_dir),
@@ -153,7 +154,7 @@ class SeparationEngine:
             return vocals_path, inst_path
 
         except Exception as e:
-            print(f"[ERR] Karaoke separation failed: {e}")
+            log(f"[ERR] Karaoke separation failed: {e}")
             return None, None
         finally:
             if temp_dir.exists():
@@ -173,7 +174,7 @@ class SeparationEngine:
         temp_dir.mkdir(exist_ok=True)
 
         try:
-            if self.verbose: print(f"[SEP] Separating Lead/Backing for {fname}...")
+            if self.verbose: log(f"[SEP] Separating Lead/Backing for {fname}...")
 
             sep = Separator(
                 output_dir=str(temp_dir),
@@ -201,7 +202,7 @@ class SeparationEngine:
             return lead_path, backing_path
 
         except Exception as e:
-            print(f"[ERR] Lead/Backing separation failed: {e}")
+            log(f"[ERR] Lead/Backing separation failed: {e}")
             return None, None
         finally:
             if temp_dir.exists():

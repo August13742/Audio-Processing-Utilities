@@ -1,8 +1,11 @@
 
 import argparse
 import sys
+import json
 from pathlib import Path
 import torch
+
+from utils.log import log
 
 from tools.dataset import DatasetBuilder
 from tools.separation import SeparationEngine
@@ -12,18 +15,34 @@ from tools.segmentation import Segmenter
 from tools.converters import AudioConverter
 from tools.analysis import AudioAnalyzer
 from tools.karaoke import KaraokePipeline
-from tools.api import run_server
+
+# ─── Subprocess output protocol ───────────────────────────────────────
+#   stdout  → single JSON object on success (machine-readable for Godot)
+#   stderr  → human-readable logs + optional JSON progress lines
+#   exit 0  → success     exit 1  → failure
+#
+# Godot usage:
+#   var output = []
+#   OS.execute("uv", ["run", "main.py", "karaoke", audio_path, out_dir], output)
+#   var result = JSON.parse_string(output[0])
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _emit_result(data: dict):
+    """Write the final machine-readable result to stdout."""
+    print(json.dumps(data, ensure_ascii=False), flush=True)
+
 
 # === COMMAND IMPLEMENTATIONS ===
 
 def cmd_clean(args):
-    print(f"[CMD] Vocal Cleaning Pipeline for {args.input}")
+    log(f"[CMD] Vocal Cleaning Pipeline for {args.input}")
     engine = CleaningEngine(device=args.device, verbose=args.verbose)
     engine.process(args.input, args.output_dir)
+    _emit_result({"status": "ok", "output_dir": str(Path(args.output_dir).resolve())})
 
 def cmd_transcribe(args):
-    print(f"[CMD] Transcription Pipeline for {args.input}")
-    # Logic: Separate -> Transcribe Lead
+    log(f"[CMD] Transcription Pipeline for {args.input}")
     sep_engine = SeparationEngine(device=args.device, verbose=args.verbose)
     asr_engine = TranscriptionEngine(model_size=args.model, device=args.device)
     
@@ -31,35 +50,40 @@ def cmd_transcribe(args):
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     
-    # Handle dir or file
     if in_path.is_file():
         files = [in_path]
     else:
         files = list(in_path.rglob("*.wav")) + list(in_path.rglob("*.mp3")) + list(in_path.rglob("*.flac"))
 
+    results = []
     for f in files:
-        print(f"\n> Processing {f.name}...")
-        # 1. Separate Lead
+        log(f"> Processing {f.name}...")
         vocals, _ = sep_engine.separate_vocals(str(f), str(out_dir))
         if vocals:
             lead, _ = sep_engine.separate_lead_backing(vocals, str(out_dir))
             target = lead if lead else vocals
             
-            # 2. Transcribe
-            text, _ = asr_engine.transcribe(target)
+            text, meta = asr_engine.transcribe(target)
             txt_path = out_dir / f"{f.stem}.txt"
             txt_path.write_text(text, encoding="utf-8")
-            print(f"  Transcript: {text[:50]}...")
+            results.append({
+                "file": f.name,
+                "transcript_path": str(txt_path.resolve()),
+                "text": text,
+                "language": meta.get("language", ""),
+            })
+
+    _emit_result({"status": "ok", "results": results})
 
 def cmd_dataset(args):
-    print(f"[CMD] Building Dataset from {args.input}")
+    log(f"[CMD] Building Dataset from {args.input}")
     builder = DatasetBuilder(output_dir=args.output_dir, device=args.device)
-    # Note: DatasetBuilder implements the AIO pipeline (Separate -> VAD -> Slice -> Select -> Transcribe)
     builder.process_dataset(args.input)
+    _emit_result({"status": "ok", "output_dir": str(Path(args.output_dir).resolve())})
 
 def cmd_segment(args):
-    print(f"[CMD] Segmenting Audio for {args.input}")
-    seg = Segmenter(method="silence", device="cpu") # VAD is fast on CPU usually
+    log(f"[CMD] Segmenting Audio for {args.input}")
+    seg = Segmenter(method="silence", device="cpu")
     
     in_path = Path(args.input)
     if in_path.is_file():
@@ -67,42 +91,50 @@ def cmd_segment(args):
     else:
         files = list(in_path.rglob("*.wav"))
         
+    outputs = []
     for f in files:
         out_sub = Path(args.output_dir) / f.stem
         seg.segment_file(str(f), str(out_sub))
+        outputs.append(str(out_sub.resolve()))
+
+    _emit_result({"status": "ok", "segment_dirs": outputs})
 
 def cmd_convert(args):
-    print(f"[CMD] Converting Audio in {args.input}")
+    log(f"[CMD] Converting Audio in {args.input}")
     conv = AudioConverter(verbose=args.verbose)
     
     if Path(args.input).is_file():
         dest = Path(args.output_dir) / Path(args.input).with_suffix(f".{args.format}").name
         conv.convert(args.input, str(dest), format=args.format)
+        _emit_result({"status": "ok", "output_file": str(dest.resolve())})
     else:
         conv.batch_convert(args.input, args.output_dir, target_format=args.format)
+        _emit_result({"status": "ok", "output_dir": str(Path(args.output_dir).resolve())})
 
 def cmd_stems(args):
-    print(f"[CMD] Extracting 6 Stems for {args.input}")
+    log(f"[CMD] Extracting 6 Stems for {args.input}")
     engine = SeparationEngine(device=args.device, verbose=args.verbose)
     
     in_path = Path(args.input)
+    outputs = []
     if in_path.is_file():
-        engine.separate_stems(str(in_path), args.output_dir)
+        out = engine.separate_stems(str(in_path), args.output_dir)
+        if out: outputs.append(out)
     else:
-        for f in in_path.glob("*.wav"): # Simple glob
-            engine.separate_stems(str(f), args.output_dir)
+        for f in in_path.glob("*.wav"):
+            out = engine.separate_stems(str(f), args.output_dir)
+            if out: outputs.append(out)
+
+    _emit_result({"status": "ok", "stem_dirs": outputs})
 
 def cmd_karaoke(args):
-    print(f"[CMD] Starting Hybrid Karaoke Pipeline for {args.input}")
+    log(f"[CMD] Starting Karaoke Pipeline for {args.input}")
     pipeline = KaraokePipeline(device=args.device)
     result = pipeline.process_song(args.input, args.output_dir)
     if not result:
-        print("[ERR] Karaoke pipeline failed.")
+        _emit_result({"status": "error", "message": "Karaoke pipeline failed."})
         sys.exit(1)
-
-def cmd_serve(args):
-    print(f"[CMD] Starting API server on {args.host}:{args.port}")
-    run_server(host=args.host, port=args.port, device=args.device)
+    _emit_result(result)
 
 def main():
     parser = argparse.ArgumentParser(description="Audio Toolkit")
@@ -152,16 +184,10 @@ def main():
     p_stem.set_defaults(func=cmd_stems)
 
     # 7. Karaoke
-    p_kara = subparsers.add_parser("karaoke", parents=[gen_parser], help="Hybrid Karaoke Pipeline (Sep -> Whisper -> Qwen)")
+    p_kara = subparsers.add_parser("karaoke", parents=[gen_parser], help="Karaoke Pipeline (Sep -> Whisper -> FCPE)")
     p_kara.add_argument("input", help="Input file")
     p_kara.add_argument("output_dir", help="Output directory")
     p_kara.set_defaults(func=cmd_karaoke)
-
-    # 8. API Server
-    p_serve = subparsers.add_parser("serve", parents=[gen_parser], help="Start HTTP/WebSocket API server")
-    p_serve.add_argument("--host", default="0.0.0.0", help="Bind host")
-    p_serve.add_argument("--port", type=int, default=8000, help="Bind port")
-    p_serve.set_defaults(func=cmd_serve)
 
     args = parser.parse_args()
     args.func(args)

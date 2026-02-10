@@ -1,21 +1,18 @@
 [project]
 name = "audio-utilities"
 version = "0.1.0"
-requires-python = "==3.10.*"
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "librosa>=0.11.0",
-    "numpy>=2.1",
+    "numpy>=2.0.2,<2.1.0",
     "soundfile>=0.13.1",
-    "scipy>=1.13.0",
     "numba>=0.59.0",
-    "torch==2.11.0.dev20260131+cu128",
-    "torchaudio==2.11.0.dev20260131+cu128",
-    "torchvision==0.25.0.dev20260131+cu128",
-    "audio-separator>=0.40.0",
+    "torch==2.8.0+cu128",
+    "torchaudio==2.8.0+cu128",
+    "torchvision==0.23.0+cu128",
     "onnxruntime-gpu>=1.23.2",
     "huggingface-hub",
     "hf_transfer>=0.1.0",
-    "qwen-asr",
     "faster-whisper>=1.0.0",
     "torchfcpe>=0.0.4",
     "speechbrain>=1.0.1",
@@ -28,12 +25,13 @@ dependencies = [
     "typeguard",
     "rotary-embedding-torch",
     "python_speech_features",
-    "pydub"
+    "pydub",
+    "audio-separator>=0.40.0",
 ]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/nightly/cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = false
 
 [tool.uv.sources]

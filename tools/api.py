@@ -1,160 +1,109 @@
 """
-Optional HTTP + WebSocket API for external karaoke system integration.
+Subprocess integration protocol for external callers (Godot, etc.)
 
-Install server dependencies (not required for CLI usage):
-    uv add fastapi uvicorn[standard]
+════════════════════════════════════════════════════════════════════════
+CALLING CONVENTION
+════════════════════════════════════════════════════════════════════════
 
-Start the server:
-    uv run main.py serve --host 0.0.0.0 --port 8000
+Every command follows the same contract:
 
-─── REST ────────────────────────────────────────────────────────────────
-POST /api/karaoke
-    Body:  {"audio_path": "/path/to/song.mp3", "output_dir": "/path/to/out"}
-    Reply: Full karaoke JSON (same schema as the file output)
+    stdout  →  Single JSON object (the result).  Parse this.
+    stderr  →  Human-readable log lines + optional JSON progress lines.
+    exit 0  →  Success.  stdout contains a valid result.
+    exit 1  →  Failure.  stdout may contain {"status": "error", "message": "..."}.
 
-GET /api/health
-    Reply: {"status": "ok"}
+────────────────────────────────────────────────────────────────────────
+GODOT EXAMPLE (GDScript 4.x)
+────────────────────────────────────────────────────────────────────────
 
-─── WebSocket ───────────────────────────────────────────────────────────
-ws://host:port/ws/karaoke
-    Send:    {"audio_path": "...", "output_dir": "..."}
-    Receive: {"type": "progress", "stage": "separation", "progress": 0.5}
-             {"type": "progress", "stage": "transcription", "progress": 1.0}
-             ...
-             {"type": "result",   "data": { ...full karaoke JSON... }}
-             {"type": "error",    "message": "..."}
+    func generate_karaoke(audio_path: String, out_dir: String) -> Dictionary:
+        var output := []
+        var exit_code := OS.execute(
+            "uv",
+            ["run", "main.py", "karaoke", audio_path, out_dir],
+            output,    # stdout captured here
+            true,      # read stderr (goes to Godot console)
+            true       # open_console = true on Windows
+        )
+        if exit_code != 0:
+            push_error("Karaoke pipeline failed")
+            return {}
+        return JSON.parse_string(output[0])
+
+────────────────────────────────────────────────────────────────────────
+READING PROGRESS  (optional — from stderr)
+────────────────────────────────────────────────────────────────────────
+
+If you need real-time progress (e.g. for a progress bar), read stderr
+line-by-line using OS.execute_with_pipe() or a Thread + OS.create_process().
+Lines that start with '{"type":"progress"' are JSON:
+
+    {"type": "progress", "stage": "separation",    "progress": 0.0}
+    {"type": "progress", "stage": "separation",    "progress": 1.0}
+    {"type": "progress", "stage": "transcription", "progress": 0.0}
+    ...
+    {"type": "progress", "stage": "alignment",     "progress": 1.0}
+
+All other stderr lines are plain human-readable log text (ignore them
+or show them in a debug console).
+
+════════════════════════════════════════════════════════════════════════
+AVAILABLE COMMANDS
+════════════════════════════════════════════════════════════════════════
+
+┌─────────────┬─────────────────────────────────────────────────────────┐
+│ Command     │ stdout result schema                                    │
+├─────────────┼─────────────────────────────────────────────────────────┤
+│ karaoke     │ {version, metadata, audio, lines[], words[]}            │
+│ transcribe  │ {status, results: [{file, transcript_path, text, lang}]}│
+│ stems       │ {status, stem_dirs: [path, ...]}                        │
+│ clean       │ {status, output_dir}                                    │
+│ segment     │ {status, segment_dirs: [path, ...]}                     │
+│ convert     │ {status, output_file | output_dir}                      │
+│ dataset     │ {status, output_dir}                                    │
+└─────────────┴─────────────────────────────────────────────────────────┘
+
+════════════════════════════════════════════════════════════════════════
+KARAOKE JSON SCHEMA  (v1.0.0)
+════════════════════════════════════════════════════════════════════════
+
+{
+  "version": "1.0.0",
+  "metadata": {
+    "title":            "Song Name",
+    "language":         "en",                    // ISO 639-1
+    "duration_seconds": 234.5,
+    "created_at":       "2026-02-10T12:00:00+00:00"
+  },
+  "audio": {
+    "original":      "Song Name.mp3",            // input filename
+    "vocals":        "Song Name_vocals.wav",     // relative to output_dir
+    "instrumental":  "Song Name_instrumental.wav"
+  },
+  "lines": [                                     // sentence-level (scrolling display)
+    {
+      "id": 0,
+      "text": "The last snowflake once fell on my nose",
+      "start": 23.44,
+      "end": 28.0,
+      "word_start_index": 0,                     // index into words[]
+      "word_end_index": 8                         // exclusive
+    }
+  ],
+  "words": [                                     // word-level (highlight sweep)
+    {
+      "text": "The",
+      "start": 23.44,
+      "end": 23.68,
+      "line_id": 0                               // back-reference to lines[]
+    }
+  ]
+}
+
+Rendering algorithm:
+  1. Play audio.instrumental
+  2. At current playback time t, find active line:  lines[i] where start <= t < end
+  3. Slice words for that line:  words[line.word_start_index : line.word_end_index]
+  4. Highlight word where word.start <= t < word.end
+  5. Scroll to next line when t >= line.end
 """
-
-from __future__ import annotations
-
-import json
-import asyncio
-import traceback
-from pathlib import Path
-from typing import Optional
-
-try:
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-    from fastapi.middleware.cors import CORSMiddleware
-    from pydantic import BaseModel
-
-    HAS_FASTAPI = True
-except ImportError:
-    HAS_FASTAPI = False
-
-
-def create_app(device: str = "cuda") -> "FastAPI":
-    """
-    Factory that returns a configured FastAPI app.
-    Lazily initialises the KaraokePipeline on first request so the server
-    starts quickly and models are loaded only when needed.
-    """
-    if not HAS_FASTAPI:
-        raise ImportError(
-            "FastAPI is not installed. Run:  uv add fastapi uvicorn[standard]"
-        )
-
-    app = FastAPI(title="Audio Utilities – Karaoke API", version="1.0.0")
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-    # Lazy singleton — heavy model loading deferred until first call
-    _pipeline_holder: dict = {}
-
-    def _get_pipeline():
-        if "instance" not in _pipeline_holder:
-            from .karaoke import KaraokePipeline
-
-            _pipeline_holder["instance"] = KaraokePipeline(device=device)
-        return _pipeline_holder["instance"]
-
-    # ── Models ──────────────────────────────────────────────────────────
-
-    class KaraokeRequest(BaseModel):
-        audio_path: str
-        output_dir: str
-
-    # ── REST endpoints ──────────────────────────────────────────────────
-
-    @app.get("/api/health")
-    async def health():
-        return {"status": "ok"}
-
-    @app.post("/api/karaoke")
-    async def karaoke_rest(req: KaraokeRequest):
-        pipeline = _get_pipeline()
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: pipeline.process_song(req.audio_path, req.output_dir),
-        )
-        if not result:
-            return {"error": "Pipeline failed — check server logs."}
-        return result
-
-    # ── WebSocket endpoint ──────────────────────────────────────────────
-
-    @app.websocket("/ws/karaoke")
-    async def karaoke_ws(ws: WebSocket):
-        await ws.accept()
-        try:
-            raw = await ws.receive_text()
-            msg = json.loads(raw)
-            audio_path = msg["audio_path"]
-            output_dir = msg["output_dir"]
-
-            pipeline = _get_pipeline()
-            loop = asyncio.get_event_loop()
-
-            # Progress callback → sends JSON frames over the socket
-            async def _send_progress(stage: str, progress: float):
-                await ws.send_json(
-                    {"type": "progress", "stage": stage, "progress": round(progress, 3)}
-                )
-
-            def _sync_progress(stage: str, progress: float):
-                asyncio.run_coroutine_threadsafe(_send_progress(stage, progress), loop)
-
-            result = await loop.run_in_executor(
-                None,
-                lambda: pipeline.process_song(
-                    audio_path, output_dir, on_progress=_sync_progress
-                ),
-            )
-
-            if result:
-                await ws.send_json({"type": "result", "data": result})
-            else:
-                await ws.send_json({"type": "error", "message": "Pipeline returned empty result."})
-
-        except WebSocketDisconnect:
-            pass
-        except Exception as exc:
-            try:
-                await ws.send_json({"type": "error", "message": str(exc)})
-            except Exception:
-                pass
-            traceback.print_exc()
-        finally:
-            try:
-                await ws.close()
-            except Exception:
-                pass
-
-    return app
-
-
-def run_server(host: str = "0.0.0.0", port: int = 8000, device: str = "cuda"):
-    """Convenience wrapper to start Uvicorn programmatically."""
-    if not HAS_FASTAPI:
-        raise ImportError(
-            "FastAPI is not installed. Run:  uv add fastapi uvicorn[standard]"
-        )
-    import uvicorn
-
-    app = create_app(device=device)
-    uvicorn.run(app, host=host, port=port)

@@ -8,6 +8,7 @@ import torchaudio
 import soundfile as sf
 import librosa
 import math
+from utils.log import log
 
 # Monkey patch for Speechbrain <-> Torchaudio compatibility if needed
 if not hasattr(torchaudio, "list_audio_backends"):
@@ -51,7 +52,7 @@ def load_audio(path: str, target_sr: int = None, mono: bool = True) -> tuple[tor
             
         return y, sr
     except Exception as e:
-        print(f"[ERR] Failed to load {path}: {e}")
+        log(f"[ERR] Failed to load {path}: {e}")
         return torch.zeros(1, 0), 0
 
 def save_audio(path: str, y: torch.Tensor, sr: int):
@@ -125,7 +126,7 @@ def check_activity(path: str, threshold: float = 0.015, duration_s: float = 60.0
         peak = np.max(np.abs(y))
         return peak > threshold
     except Exception as e:
-        print(f"[WARN] Activity check failed for {path}: {e}")
+        log(f"[WARN] Activity check failed for {path}: {e}")
         return False
 
 def match_audio_length(y: torch.Tensor, target_length: int) -> torch.Tensor:
