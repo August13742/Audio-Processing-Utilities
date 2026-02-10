@@ -50,17 +50,23 @@ class TranscriptionEngine:
             )
             
             texts = []
+            segments_data = []
             words = []
             
             for segment in segments:
                 texts.append(segment.text)
+                segments_data.append({
+                    "text": segment.text.strip(),
+                    "start": round(segment.start, 3),
+                    "end": round(segment.end, 3),
+                })
                 if return_timestamps and segment.words:
                     for w in segment.words:
                         words.append({
                             "word": w.word,
-                            "start": w.start,
-                            "end": w.end,
-                            "probability": w.probability
+                            "start": round(w.start, 3),
+                            "end": round(w.end, 3),
+                            "probability": round(w.probability, 4)
                         })
                 
             full_text = "".join(texts).strip() # Joined for Japanese
@@ -69,6 +75,7 @@ class TranscriptionEngine:
                 "language": info.language,
                 "language_probability": info.language_probability,
                 "duration": info.duration,
+                "segments": segments_data,
                 "timestamps": words
             }
             

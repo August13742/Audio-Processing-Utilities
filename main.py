@@ -12,6 +12,7 @@ from tools.segmentation import Segmenter
 from tools.converters import AudioConverter
 from tools.analysis import AudioAnalyzer
 from tools.karaoke import KaraokePipeline
+from tools.api import run_server
 
 # === COMMAND IMPLEMENTATIONS ===
 
@@ -89,15 +90,22 @@ def cmd_stems(args):
         engine.separate_stems(str(in_path), args.output_dir)
     else:
         for f in in_path.glob("*.wav"): # Simple glob
-             engine.separate_stems(str(f), args.output_dir)
+            engine.separate_stems(str(f), args.output_dir)
 
 def cmd_karaoke(args):
     print(f"[CMD] Starting Hybrid Karaoke Pipeline for {args.input}")
     pipeline = KaraokePipeline(device=args.device)
-    pipeline.process_song(args.input, args.output_dir)
+    result = pipeline.process_song(args.input, args.output_dir)
+    if not result:
+        print("[ERR] Karaoke pipeline failed.")
+        sys.exit(1)
+
+def cmd_serve(args):
+    print(f"[CMD] Starting API server on {args.host}:{args.port}")
+    run_server(host=args.host, port=args.port, device=args.device)
 
 def main():
-    parser = argparse.ArgumentParser(description="Ultra Audio Toolkit")
+    parser = argparse.ArgumentParser(description="Audio Toolkit")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # Global Args
@@ -148,6 +156,12 @@ def main():
     p_kara.add_argument("input", help="Input file")
     p_kara.add_argument("output_dir", help="Output directory")
     p_kara.set_defaults(func=cmd_karaoke)
+
+    # 8. API Server
+    p_serve = subparsers.add_parser("serve", parents=[gen_parser], help="Start HTTP/WebSocket API server")
+    p_serve.add_argument("--host", default="0.0.0.0", help="Bind host")
+    p_serve.add_argument("--port", type=int, default=8000, help="Bind port")
+    p_serve.set_defaults(func=cmd_serve)
 
     args = parser.parse_args()
     args.func(args)
