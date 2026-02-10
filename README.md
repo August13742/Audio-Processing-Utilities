@@ -1,5 +1,8 @@
 # Audio Utilities – Processing Toolkit
 
+**A Vibe Coding Project**
+
+
 A comprehensive audio processing toolkit for vocal separation, transcription, and karaoke generation.
 Powered by **BS-Roformer**, **Mel-Band Roformer**, **Faster-Whisper**, and **Torch-FCPE**.
 
