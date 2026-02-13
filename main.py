@@ -134,7 +134,13 @@ def cmd_karaoke(args):
     if not result:
         _emit_result({"status": "error", "message": "Karaoke pipeline failed."})
         sys.exit(1)
-    _emit_result(result)
+    # Emit only a status summary to stdout instead of the full 100KB+ JSON curve.
+    # The full data is already saved to 'karaoke.json' in the song subfolder.
+    _emit_result({
+        "status": "ok", 
+        "song": result.get("metadata", {}).get("title"),
+        "output_dir": args.output_dir
+    })
 
 def main():
     parser = argparse.ArgumentParser(description="Audio Toolkit")

@@ -156,12 +156,15 @@ class KaraokePipeline:
         # Build sparse pitch events (decoupled from word timing)
         # Each event = {time, midi, note} at ~100ms intervals, voiced only.
         # Game looks up target pitch by timestamp — no dependency on word boundaries.
-        # Trim pitch to the range of the lyrics (+ buffer) to avoid outro noise.
+        # Trim pitch to the range of the lyrics (±1s buffer) to avoid intro/outro noise.
+        first_word_time = min(w["start"] for w in words) if words else 0
         last_word_time = max(w["end"] for w in words) if words else 0
+        
         pitch_events = build_sparse_pitch(
             pitch_data["midi_clean"],
             pitch_data["voiced"],
             pitch_data["hop_seconds"],
+            min_time=max(0, first_word_time - 1.0),
             max_time=last_word_time + 1.0,
         )
 

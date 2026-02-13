@@ -20,9 +20,9 @@ _ENERGY_OVERLAP_THRESHOLD = 0.15
 # RMS window size for energy calculation (seconds)
 _RMS_WINDOW_S = 0.05
 
-# dB below peak RMS to consider "silence". -40dB means anything quieter
-# than 1/100th of the loudest moment is treated as no vocal activity.
-_SILENCE_DB = -40.0
+# dB below peak RMS to consider "silence". -35dB means anything quieter
+# than ~1.8% of the loudest peak is treated as no vocal activity.
+_SILENCE_DB = -35.0
 
 
 class TranscriptionEngine:

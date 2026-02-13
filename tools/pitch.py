@@ -39,6 +39,11 @@ MIN_VOICED_DURATION_S = 0.03    # Segments shorter than 30 ms are likely noise
 SAVGOL_WINDOW_S = 0.05          # 50 ms Savitzky-Golay window
 MEDIAN_KERNEL_S = 0.03          # 30 ms median filter for spike removal
 
+# Energy-based noise rejection
+_RMS_WINDOW_S = 0.05
+_SILENCE_DB = -35.0             # dB below peak RMS to discard as noise
+
+
 # Sparse pitch output
 PITCH_EVENT_HOP_S = 0.1         # 100 ms — coarse enough to hide jitter
 
@@ -189,6 +194,7 @@ def build_sparse_pitch(
     voiced_mask: np.ndarray,
     hop_s: float = HOP_SECONDS,
     event_hop_s: float = PITCH_EVENT_HOP_S,
+    min_time: Optional[float] = None,
     max_time: Optional[float] = None,
 ) -> List[Dict]:
     """
@@ -202,8 +208,8 @@ def build_sparse_pitch(
         voiced_mask:  Voicing mask.
         hop_s:        Native hop size of the curve.
         event_hop_s:  Hop size for the sparse output (target interval).
+        min_time:     Optional. If set, pitch events before this time are discarded.
         max_time:     Optional. If set, pitch events after this time are discarded.
-                      Useful for trimming pitch to the range of the lyrics.
     """
     from scipy.signal import medfilt
 
@@ -214,6 +220,8 @@ def build_sparse_pitch(
 
     for block_start in range(0, n_frames, block_size):
         t = round(block_start * hop_s, 2)
+        if min_time is not None and t < min_time:
+            continue
         if max_time is not None and t > max_time:
             break
 
@@ -325,10 +333,15 @@ class PitchExtractor:
         # Squeeze to 1-D numpy
         f0_np = f0.squeeze().cpu().numpy().astype(np.float64)
 
-        # Voicing: f0 > 0 means voiced
+        # 1. Voicing: f0 > 0 means voiced
         voiced = f0_np > 0
 
-        # Zero out anything outside singing range
+        # 2. Energy-based rejection (RMS mask)
+        # Kill frames that are too quiet, even if FCPE thinks they are voiced.
+        energy_mask = self._compute_rms_mask(wav_np[0], sr, len(f0_np))
+        voiced = voiced & energy_mask
+
+        # 3. Zero out anything outside singing range
         out_of_range = (f0_np < HUMAN_F0_MIN) | (f0_np > HUMAN_F0_MAX)
         f0_np[out_of_range] = 0.0
         voiced[out_of_range] = False
@@ -347,3 +360,28 @@ class PitchExtractor:
             "midi_clean": midi_clean,
             "hop_seconds": HOP_SECONDS,
         }
+
+    def _compute_rms_mask(self, audio: np.ndarray, sr: int, target_len: int) -> np.ndarray:
+        """Compute a boolean mask where energy > _SILENCE_DB."""
+        win_size = int(_RMS_WINDOW_S * sr)
+        hop_size = int(round(len(audio) / target_len))
+        
+        # Simple moving RMS
+        # Pad slightly to match target_len exactly via windowing
+        rms_frames = []
+        for i in range(target_len):
+            start = int(i * hop_size)
+            end = min(start + win_size, len(audio))
+            if start >= len(audio):
+                rms_frames.append(0.0)
+                continue
+            window = audio[start:end]
+            rms = np.sqrt(np.mean(window**2) + 1e-9)
+            rms_frames.append(rms)
+            
+        rms_np = np.array(rms_frames)
+        peak_rms = np.max(rms_np) if len(rms_np) > 0 else 1.0
+        
+        # Convert dB threshold to linear
+        threshold = peak_rms * (10 ** (_SILENCE_DB / 20.0))
+        return rms_np > threshold
