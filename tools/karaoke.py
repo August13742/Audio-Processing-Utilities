@@ -7,7 +7,8 @@ from typing import Optional, Dict, List, Callable
 from datetime import datetime, timezone
 from .separation import SeparationEngine
 from .transcription import TranscriptionEngine
-from .pitch import PitchExtractor, assign_pitch_to_words
+from .pitch import PitchExtractor, build_sparse_pitch
+from .enhancement import EnhancementEngine
 from utils.log import log, emit_progress
 
 # Schema version — bump on breaking JSON structure changes.
@@ -25,6 +26,7 @@ class KaraokePipeline:
         audio           - relative filenames for original, vocals, instrumental
         lines[]         - sentence-level timing (for scrolling lyrics display)
         words[]         - word-level timing with line_id (for per-word highlight/sweep)
+        pitch[]         - sparse voiced-only pitch events at ~100ms intervals
 
     Designed for consumption by external systems (Godot, etc.) via subprocess.
     Progress is emitted to stderr as JSON lines; final result goes to stdout.
@@ -44,6 +46,9 @@ class KaraokePipeline:
         log("[Karaoke] Loading Pitch Extractor (FCPE)...")
         self.pitch_extractor = PitchExtractor(device=device)
 
+        log("[Karaoke] Loading Speech Enhancer (MossFormer2)...")
+        self.enhancer = EnhancementEngine(device=device)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -61,8 +66,8 @@ class KaraokePipeline:
             audio_path:  Path to the input audio file.
             output_dir:  Directory for all output files.
             on_progress: Optional ``callback(stage: str, progress: float)``.
-                         If None, progress is emitted to stderr as JSON lines
-                         (suitable for subprocess consumers like Godot).
+                        If None, progress is emitted to stderr as JSON lines
+                        (suitable for subprocess consumers like Godot).
 
         Returns:
             The full karaoke result dict (same structure as the saved JSON),
@@ -70,7 +75,8 @@ class KaraokePipeline:
         """
         audio_path = Path(audio_path)
         output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        song_dir = output_dir / audio_path.stem
+        song_dir.mkdir(parents=True, exist_ok=True)
 
         def _emit(stage: str, pct: float):
             if on_progress:
@@ -80,29 +86,52 @@ class KaraokePipeline:
 
         # --- 1. Separate (2-stem karaoke model) ---
         _emit("separation", 0.0)
-        log(f"[1/4] Separating Vocals (Karaoke 2-stem): {audio_path.name}")
+        log(f"[1/5] Separating Vocals (Karaoke 2-stem): {audio_path.name}")
         vocal_path, instrumental_path = self.separator.separate_karaoke(
-            str(audio_path), str(output_dir)
+            str(audio_path), str(song_dir)
         )
         _emit("separation", 1.0)
+
+        # Rename to generic names — the subfolder carries the song identity
+        if vocal_path:
+            clean_vocal = song_dir / "vocals.wav"
+            Path(vocal_path).rename(clean_vocal)
+            vocal_path = str(clean_vocal)
+        if instrumental_path:
+            clean_inst = song_dir / "instrumental.wav"
+            Path(instrumental_path).rename(clean_inst)
+            instrumental_path = str(clean_inst)
 
         if not vocal_path:
             log("[ERR] Separation produced no vocal track.")
             return {}
 
-        # --- 2. Transcribe with Whisper (segments + words) ---
+        # --- 2. Enhance Vocals (internal use for ASR/Pitch) ---
+        _emit("enhancement", 0.0)
+        log("[2/5] Enhancing vocals with MossFormer2 (for processing)")
+        vocal_path_obj = Path(vocal_path)
+        enhanced_vocal_path = str(vocal_path_obj.with_name("vocals_enhanced.wav"))
+        
+        success = self.enhancer.process(vocal_path, enhanced_vocal_path)
+        if not success:
+            log("[WARN] Enhancement failed, falling back to raw separated vocals.")
+            enhanced_vocal_path = vocal_path
+        _emit("enhancement", 1.0)
+
+        # --- 3. Transcribe with Whisper (segments + words) ---
         _emit("transcription", 0.0)
-        log(f"[2/4] Transcribing with Whisper ({self.transcriber.model_size})")
-        whisper_text, metadata = self.transcriber.transcribe(vocal_path)
+        log(f"[3/5] Transcribing with Whisper ({self.transcriber.model_size})")
+        # Use enhanced vocals for transcription
+        whisper_text, metadata = self.transcriber.transcribe(enhanced_vocal_path)
         _emit("transcription", 1.0)
 
         if not whisper_text:
             log("[ERR] Transcription returned empty text.")
             return {}
 
-        # --- 3. Word-level timestamps from Whisper ---
+        # --- 4. Word-level timestamps from Whisper ---
         _emit("alignment", 0.0)
-        log("[3/4] Extracting word-level timestamps from Whisper")
+        log("[4/5] Extracting word-level timestamps from Whisper")
 
         lang_detected = metadata.get("language", "ja")
         lang_map = {"ja": "Japanese", "en": "English", "zh": "Chinese"}
@@ -113,25 +142,27 @@ class KaraokePipeline:
         aligned_words = self._extract_whisper_words(metadata)
         _emit("alignment", 1.0)
 
-        # --- 4. Pitch extraction (FCPE) ---
+        # --- 5. Pitch extraction (FCPE) ---
         _emit("pitch", 0.0)
-        log("[4/4] Extracting pitch curve (FCPE)")
-        pitch_data = self.pitch_extractor.extract(vocal_path)
+        log("[5/5] Extracting pitch curve (FCPE)")
+        # Use enhanced vocals for pitch extraction
+        pitch_data = self.pitch_extractor.extract(enhanced_vocal_path)
         _emit("pitch", 1.0)
 
         # --- 5. Build structured karaoke output ---
         lines = self._build_lines(metadata.get("segments", []))
         words = self._assign_words_to_lines(aligned_words, lines)
 
-        # Enrich words with per-word pitch (for scoring & melody guide)
-        # Each word gets pitch_midi, pitch_hz, note — the game draws target
-        # note boxes from (word.start, word.end, word.pitch_midi).
-        # No frame-level pitch array needed — games use per-word rectangles.
-        words = assign_pitch_to_words(
-            words,
+        # Build sparse pitch events (decoupled from word timing)
+        # Each event = {time, midi, note} at ~100ms intervals, voiced only.
+        # Game looks up target pitch by timestamp — no dependency on word boundaries.
+        # Trim pitch to the range of the lyrics (+ buffer) to avoid outro noise.
+        last_word_time = max(w["end"] for w in words) if words else 0
+        pitch_events = build_sparse_pitch(
             pitch_data["midi_clean"],
             pitch_data["voiced"],
             pitch_data["hop_seconds"],
+            max_time=last_word_time + 1.0,
         )
 
         result = {
@@ -144,18 +175,27 @@ class KaraokePipeline:
             },
             "audio": {
                 "original": audio_path.name,
-                "vocals": Path(vocal_path).name if vocal_path else None,
-                "instrumental": Path(instrumental_path).name if instrumental_path else None,
+                "vocals": "vocals.wav" if vocal_path else None,
+                "instrumental": "instrumental.wav" if instrumental_path else None,
             },
             "lines": lines,
             "words": words,
+            "pitch": pitch_events,
         }
 
-        output_file = output_dir / f"{audio_path.stem}_karaoke.json"
+        output_file = song_dir / "karaoke.json"
         with open(output_file, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
 
         log(f"[DONE] Karaoke data saved to: {output_file}")
+
+        # Cleanup temporary enhanced vocal track
+        if 'enhanced_vocal_path' in locals() and enhanced_vocal_path != vocal_path and os.path.exists(enhanced_vocal_path):
+            try:
+                os.remove(enhanced_vocal_path)
+            except Exception as e:
+                log(f"[WARN] Failed to cleanup enhanced vocal file: {e}")
+
         return result
 
     # ------------------------------------------------------------------

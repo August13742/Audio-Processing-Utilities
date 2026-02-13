@@ -8,7 +8,7 @@ points than punish them for model errors.
 Core flow:
     1. FCPE pitch extraction  →  raw f0 (Hz) + voicing mask
     2. Curve cleaning          →  smoothed continuous-MIDI curve
-    3. Per-word pitch summary  →  median MIDI note per word (for scoring)
+    3. Sparse pitch events     →  median MIDI at ~100 ms intervals (voiced only)
 
 All functions operate on NumPy arrays.  The PitchExtractor class wraps
 the torch-level FCPE model and returns plain arrays for downstream use.
@@ -38,6 +38,9 @@ MIN_VOICED_DURATION_S = 0.03    # Segments shorter than 30 ms are likely noise
 # Smoothing
 SAVGOL_WINDOW_S = 0.05          # 50 ms Savitzky-Golay window
 MEDIAN_KERNEL_S = 0.03          # 30 ms median filter for spike removal
+
+# Sparse pitch output
+PITCH_EVENT_HOP_S = 0.1         # 100 ms — coarse enough to hide jitter
 
 
 # ---------------------------------------------------------------------------
@@ -178,107 +181,74 @@ def _to_odd(n: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Per-word pitch assignment
+# Sparse voiced-only pitch events
 # ---------------------------------------------------------------------------
 
-def assign_pitch_to_words(
-    words: List[Dict],
+def build_sparse_pitch(
     midi_curve: np.ndarray,
     voiced_mask: np.ndarray,
     hop_s: float = HOP_SECONDS,
+    event_hop_s: float = PITCH_EVENT_HOP_S,
+    max_time: Optional[float] = None,
 ) -> List[Dict]:
     """
-    For each word, compute the median pitched MIDI value within its time span.
+    Downsample the fine FCPE curve into sparse pitch events.
 
-    Words with no voiced frames get ``pitch_midi: 0`` — the game should
-    treat these as **free points** (no pitch penalty).
-
-    Mutates *copies* of the word dicts in-place; returns the new list.
-    """
-    enriched = []
-    n_frames = len(midi_curve)
-
-    for w in words:
-        w = dict(w)  # shallow copy
-        start_frame = int(w["start"] / hop_s)
-        end_frame = int(w["end"] / hop_s)
-        start_frame = max(0, min(start_frame, n_frames - 1))
-        end_frame = max(start_frame + 1, min(end_frame, n_frames))
-
-        segment = midi_curve[start_frame:end_frame]
-        seg_voiced = voiced_mask[start_frame:end_frame]
-
-        voiced_vals = segment[seg_voiced]
-
-        if len(voiced_vals) >= 1:
-            pitch_midi = float(np.median(voiced_vals))
-            pitch_hz = float(midi_to_hz(np.array([pitch_midi]))[0])
-            note = midi_to_note_name(pitch_midi)
-        else:
-            # No pitch detected → free points for the singer
-            pitch_midi = 0.0
-            pitch_hz = 0.0
-            note = ""
-
-        w["pitch_midi"] = round(pitch_midi, 2)
-        w["pitch_hz"] = round(pitch_hz, 1)
-        w["note"] = note
-        enriched.append(w)
-
-    return enriched
-
-
-# ---------------------------------------------------------------------------
-# Compact pitch section for JSON output
-# ---------------------------------------------------------------------------
-
-def build_pitch_section(
-    midi_curve: np.ndarray,
-    voiced_mask: np.ndarray,
-    hop_s: float = HOP_SECONDS,
-    words: List[Dict] = None,
-) -> Dict:
-    """
-    Build the top-level ``pitch`` dict for the karaoke JSON.
-
-    Uses compact parallel arrays (not per-frame dicts) to keep file size
-    manageable. Only includes frames that correspond to the lyrics time range.
+    Each event is a short time block (~100 ms) with a median MIDI value.
+    Only blocks that contain voiced frames are emitted.
 
     Args:
-        midi_curve:  MIDI pitch values (or 0 for unvoiced)
-        voiced_mask: Boolean mask of voiced frames
-        hop_s:       Hop time in seconds (frame duration)
-        words:       Optional list of word dicts with 'start'/'end' times.
-                     If provided, trims pitch array to cover word time range.
-
-    Game reconstructs timestamps as ``t = start_seconds + i * hop_seconds``.
-    Unvoiced frames have value ``0``.
+        midi_curve:   Cleaned MIDI pitch curve.
+        voiced_mask:  Voicing mask.
+        hop_s:        Native hop size of the curve.
+        event_hop_s:  Hop size for the sparse output (target interval).
+        max_time:     Optional. If set, pitch events after this time are discarded.
+                      Useful for trimming pitch to the range of the lyrics.
     """
-    # Determine time range to output (only where words exist)
-    if words and len(words) > 0:
-        start_time = min(w["start"] for w in words)
-        end_time = max(w["end"] for w in words)
-        start_frame = max(0, int(start_time / hop_s))
-        end_frame = min(len(midi_curve), int(np.ceil(end_time / hop_s)))
-        
-        midi_trimmed = midi_curve[start_frame:end_frame]
-        values = np.round(midi_trimmed, 2).tolist()
-        
-        return {
-            "hop_seconds": hop_s,
-            "unit": "midi",
-            "start_seconds": round(start_time, 2),
-            "values": values,
-        }
-    else:
-        # Fallback: output full curve if no words (shouldn't happen in practice)
-        values = np.round(midi_curve, 2).tolist()
-        return {
-            "hop_seconds": hop_s,
-            "unit": "midi",
-            "start_seconds": 0.0,
-            "values": values,
-        }
+    from scipy.signal import medfilt
+
+    n_frames = len(midi_curve)
+    block_size = max(1, int(event_hop_s / hop_s))  # frames per event block
+
+    events: List[Dict] = []
+
+    for block_start in range(0, n_frames, block_size):
+        t = round(block_start * hop_s, 2)
+        if max_time is not None and t > max_time:
+            break
+
+        block_end = min(block_start + block_size, n_frames)
+        seg = midi_curve[block_start:block_end]
+        seg_voiced = voiced_mask[block_start:block_end]
+        voiced_vals = seg[seg_voiced]
+
+        if len(voiced_vals) < 1:
+            continue
+
+        pitch_midi = int(round(float(np.median(voiced_vals))))
+
+        events.append({
+            "time": t,
+            "midi": pitch_midi,
+            "note": midi_to_note_name(pitch_midi),
+        })
+
+    # Post-hoc median filter across consecutive events to kill outlier blocks.
+    # Operates on the midi values only; timestamps are untouched.
+    if len(events) >= 3:
+        midi_arr = np.array([e["midi"] for e in events])
+        kernel = min(5, _to_odd(len(midi_arr)))
+        if kernel >= 3:
+            smoothed = medfilt(midi_arr, kernel_size=kernel)
+            for i, e in enumerate(events):
+                val = int(round(float(smoothed[i])))
+                e["midi"] = val
+                e["note"] = midi_to_note_name(val)
+
+    log(f"[Pitch] Built {len(events)} sparse pitch events "
+        f"(hop={event_hop_s}s, voiced only, whole-note)")
+
+    return events
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +289,6 @@ class PitchExtractor:
         import torchaudio
 
         log(f"[Pitch] Loading audio: {audio_path}")
-        # Use soundfile instead of torchaudio.load to avoid TorchCodec dependency
         wav_np, sr = sf.read(audio_path)
         if wav_np.ndim == 1:
             wav_np = wav_np[np.newaxis, :]  # (1, n_samples)
@@ -342,8 +311,6 @@ class PitchExtractor:
 
         log("[Pitch] Running FCPE inference...")
         with torch.no_grad():
-            # Get f0 and voicing separately
-            # Don't use interp_uv since we're not interpolating
             f0 = self.model.infer(
                 wav_in,
                 sr=sr,
@@ -358,26 +325,10 @@ class PitchExtractor:
         # Squeeze to 1-D numpy
         f0_np = f0.squeeze().cpu().numpy().astype(np.float64)
 
-        # Get voicing mask via a second pass with thresholding
-        # Low-confidence frames are treated as unvoiced
-        with torch.no_grad():
-            # Re-infer to get confidence scores for voicing detection
-            f0_with_conf = self.model.infer(
-                wav_in,
-                sr=sr,
-                decoder_mode="local_argmax",
-                threshold=0.006,  # This threshold determines voicing
-                f0_min=HUMAN_F0_MIN,
-                f0_max=HUMAN_F0_MAX,
-                interp_uv=False,
-                retur_uv=False,
-            )
-        
-        # Unvoiced frames show as very low values or 0 after threshold
-        # Simple heuristic: f0 > 0 means voiced
+        # Voicing: f0 > 0 means voiced
         voiced = f0_np > 0
 
-        # Additionally zero out anything outside singing range
+        # Zero out anything outside singing range
         out_of_range = (f0_np < HUMAN_F0_MIN) | (f0_np > HUMAN_F0_MAX)
         f0_np[out_of_range] = 0.0
         voiced[out_of_range] = False

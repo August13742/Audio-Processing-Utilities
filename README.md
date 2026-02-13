@@ -35,10 +35,10 @@ The primary use case: generate structured karaoke data from audio.
 uv run main.py karaoke "path/to/song.mp3" "output_directory/"
 ```
 
-**Outputs:**
-- `song_vocals.wav` — isolated lead vocal track
-- `song_instrumental.wav` — instrumental backing track  
-- `song_karaoke.json` — structured lyrics with timings (see schema below)
+**Outputs** (bundled into a subfolder named after the song):
+- `song/vocals.wav` — isolated lead vocal track
+- `song/instrumental.wav` — instrumental backing track  
+- `song/karaoke.json` — structured lyrics with timings (see schema below)
 
 ---
 
@@ -70,8 +70,8 @@ uv run main.py karaoke "song.mp3" "output/"
   },
   "audio": {
     "original": "song.mp3",
-    "vocals": "song_vocals.wav",
-    "instrumental": "song_instrumental.wav"
+    "vocals": "vocals.wav",
+    "instrumental": "instrumental.wav"
   },
   "lines": [
     {
@@ -444,11 +444,12 @@ We extensively tested alternative alignment approaches on the **Kiritan Singing 
 | WhisperX (forced alignment) | 114,989ms | 8.6% | ❌ Catastrophic due to VAD hallucinations |
 | Whisper + WhisperX | 84.2ms | 72.8% | ❌ Degrades baseline by 82% |
 
-**Key Finding:** Whisper's built-in word timestamps are **production-ready**. The karaoke-tuned configuration (`vad_filter=False`, `no_speech_threshold=0.8`) ensures robustness on singing audio:
-- Disables Voice Activity Detection (VAD) to catch sustained vowels
-- Raises no-speech threshold so quiet passages aren't missed
-- Relaxes compression ratio check to avoid timeouts on melisma
-- Disables context chaining to prevent hallucinations
+**Key Finding:** Whisper's built-in word timestamps are **production-ready**. The karaoke-tuned configuration ensures robustness on singing audio:
+- `vad_filter=False` — disables Voice Activity Detection to catch sustained vowels
+- `no_speech_threshold=0.8` — raises bar so quiet passages aren't missed
+- `compression_ratio_threshold=2.8` — relaxed to avoid timeouts on melisma
+- `condition_on_previous_text=False` — prevents cascading hallucinations
+- `temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0)` — fallback chain: retries at higher temperature when greedy decode fails quality checks
 
 Alternative approaches (Qwen, WhisperX) either:
 - Hallucinate on karaoke audio due to speech-optimized defaults
@@ -478,12 +479,10 @@ After running a command, the output directory contains:
 
 ```
 output/
-├── song_vocals.wav            # Lead vocal track
-├── song_instrumental.wav       # Instrumental backing
-├── song_karaoke.json          # Karaoke data (schema v1.0.0)
-├── song_lead.wav              # (if transcribe + lead/backing separation)
-├── song_backing.wav           # (if transcribe + lead/backing separation)
-└── song_<stem>.wav            # (if stems command: drums, bass, guitar, piano, other)
+└── song/
+    ├── vocals.wav               # Lead vocal track
+    ├── instrumental.wav          # Instrumental backing
+    └── karaoke.json             # Karaoke data (schema v1.1.0)
 ```
 
 ---
