@@ -111,7 +111,7 @@ class SeparationEngine:
             log(f"[ERR] Stems separation failed: {e}")
             return None
 
-    def separate_karaoke(self, input_path: str, output_dir: str) -> Tuple[Optional[str], Optional[str]]:
+    def separate_karaoke(self, input_path: str, output_dir: str, model_name: str = "melband_roformer_big_beta6.ckpt") -> Tuple[Optional[str], Optional[str]]:
         """
         2-stem vocal/instrumental separation using Mel-Band Roformer (karaoke-optimized).
         Faster than 6-stem BS-Roformer and purpose-built for karaoke isolation.
@@ -134,7 +134,7 @@ class SeparationEngine:
                 output_format="WAV",
                 log_level=40
             )
-            sep.load_model('model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt')
+            sep.load_model(model_name)
             sep.separate(input_path)
 
             vocals_path = None
@@ -146,7 +146,7 @@ class SeparationEngine:
                     dest = out_path / f"{fname}_vocals.wav"
                     shutil.move(str(f), str(dest))
                     vocals_path = str(dest)
-                elif "(instrumental)" in name_lower:
+                elif "(instrumental)" in name_lower or "(other)" in name_lower or "(no_vocals)" in name_lower:
                     dest = out_path / f"{fname}_instrumental.wav"
                     shutil.move(str(f), str(dest))
                     inst_path = str(dest)
@@ -207,3 +207,83 @@ class SeparationEngine:
         finally:
             if temp_dir.exists():
                 shutil.rmtree(temp_dir)
+
+    def separate_dereverb(self, input_path: str, output_dir: str, model_name: str = "dereverb_mel_band_roformer_anvuew_sdr_19.1729.ckpt") -> Optional[str]:
+        """
+        Applies dereverb to the input audio using a Roformer model.
+        Returns the path to the dereverbed audio (dry), or None if failed.
+        """
+        if not input_path or not os.path.exists(input_path):
+            return None
+
+        fname = Path(input_path).stem
+        out_path = Path(output_dir)
+        temp_dir = out_path / f"temp_{fname}_dereverb"
+        temp_dir.mkdir(exist_ok=True)
+
+        try:
+            if self.verbose: log(f"[SEP] Dereverbing {fname} with {model_name}...")
+
+            sep = Separator(
+                output_dir=str(temp_dir),
+                model_file_dir=str(self.model_dir),
+                output_format="WAV",
+                log_level=40
+            )
+            sep.load_model(model_name)
+            sep.separate(input_path)
+
+            dry_path = None
+            
+            
+            for f in temp_dir.glob("*.wav"):
+                name_lower = f.name.lower()
+                if "(dry)" in name_lower or "_dry" in name_lower or "(clean)" in name_lower or "(noreverb)" in name_lower:
+                    dest = out_path / f"{fname}_dry.wav"
+                    shutil.move(str(f), str(dest))
+                    dry_path = str(dest)
+                    break
+            
+            if not dry_path:
+                 all_wavs = list(temp_dir.glob("*.wav"))
+                 if self.verbose: log(f"[DEBUG] Dereverb output files: {[f.name for f in all_wavs]}")
+                 
+                 for f in all_wavs:
+                    name_lower = f.name.lower()
+                    if "reverb" not in name_lower and "other" not in name_lower: 
+                        if "(vocals)" in name_lower:
+                            dest = out_path / f"{fname}_dry.wav"
+                            shutil.move(str(f), str(dest))
+                            dry_path = str(dest)
+                            break
+
+
+            
+            if not dry_path:
+                # specific check for Anvuew model outputs if known, otherwise safe fallback
+                all_wavs = list(temp_dir.glob("*.wav"))
+                for f in all_wavs:
+                    if "dry" in f.name.lower():
+                        dest = out_path / f"{fname}_dry.wav"
+                        shutil.move(str(f), str(dest))
+                        dry_path = str(dest)
+                        break
+
+            return dry_path
+
+        except Exception as e:
+            log(f"[ERR] Dereverb failed: {e}")
+            return None
+        finally:
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir)
+
+    def separate_instrumental(self, input_path: str, output_dir: str, model_name: str = "melband_roformer_inst_v1e.ckpt") -> Optional[str]:
+        """
+        Extracts only the instrumental track using a specific model (e.g. Mel-Band Roformer Inst).
+        Returns path to instrumental.wav.
+        """
+        # Reuse separate_karaoke logic since it handles 2-stem separation
+        # and we just want the instrumental part.
+        _, inst_path = self.separate_karaoke(input_path, output_dir, model_name=model_name)
+        return inst_path

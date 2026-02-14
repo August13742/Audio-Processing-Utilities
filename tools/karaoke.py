@@ -8,7 +8,10 @@ from datetime import datetime, timezone
 from .separation import SeparationEngine
 from .transcription import TranscriptionEngine
 from .pitch import PitchExtractor, build_sparse_pitch
-from .enhancement import EnhancementEngine
+from .pitch import PitchExtractor, build_sparse_pitch
+# from .enhancement import EnhancementEngine
+from .converters import AudioConverter
+from .converters import AudioConverter
 from utils.log import log, emit_progress
 
 # Schema version — bump on breaking JSON structure changes.
@@ -37,17 +40,28 @@ class KaraokePipeline:
         model_dir: str = "models",
         device: str = "cuda",
         whisper_model: str = "large-v3",
+        karaoke_model: str = "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+        instrumental_model: str = "melband_roformer_inst_v1e.ckpt",
+        dereverb_model: str = "dereverb_mel_band_roformer_anvuew_sdr_19.1729.ckpt",
     ):
         self.device = device
         self.model_dir = Path(model_dir)
         self.separator = SeparationEngine(model_dir=model_dir, device=device)
         self.transcriber = TranscriptionEngine(model_size=whisper_model, device=device)
+        
+        self.karaoke_model = karaoke_model
+        self.instrumental_model = instrumental_model
+        self.dereverb_model = dereverb_model
 
         log("[Karaoke] Loading Pitch Extractor (FCPE)...")
         self.pitch_extractor = PitchExtractor(device=device)
 
-        log("[Karaoke] Loading Speech Enhancer (MossFormer2)...")
-        self.enhancer = EnhancementEngine(device=device)
+        # Replaced MossFormer2 with Roformer Dereverb
+        # log("[Karaoke] Loading Speech Enhancer (MossFormer2)...")
+        # self.enhancer = EnhancementEngine(device=device)
+
+        log("[Karaoke] Initializing Audio Converter (FFmpeg)...")
+        self.converter = AudioConverter(verbose=True)
 
     # ------------------------------------------------------------------
     # Public API
@@ -84,43 +98,130 @@ class KaraokePipeline:
             else:
                 emit_progress(stage, pct)
 
-        # --- 1. Separate (2-stem karaoke model) ---
         _emit("separation", 0.0)
-        log(f"[1/5] Separating Vocals (Karaoke 2-stem): {audio_path.name}")
-        vocal_path, instrumental_path = self.separator.separate_karaoke(
-            str(audio_path), str(song_dir)
-        )
-        _emit("separation", 1.0)
-
-        # Rename to generic names — the subfolder carries the song identity
-        if vocal_path:
-            clean_vocal = song_dir / "vocals.wav"
-            Path(vocal_path).rename(clean_vocal)
-            vocal_path = str(clean_vocal)
-        if instrumental_path:
-            clean_inst = song_dir / "instrumental.wav"
-            Path(instrumental_path).rename(clean_inst)
-            instrumental_path = str(clean_inst)
-
-        if not vocal_path:
-            log("[ERR] Separation produced no vocal track.")
-            return {}
-
-        # --- 2. Enhance Vocals (internal use for ASR/Pitch) ---
-        _emit("enhancement", 0.0)
-        log("[2/5] Enhancing vocals with MossFormer2 (for processing)")
-        vocal_path_obj = Path(vocal_path)
-        enhanced_vocal_path = str(vocal_path_obj.with_name("vocals_enhanced.wav"))
+        log(f"[1/6] Running Separation Models...")
         
-        success = self.enhancer.process(vocal_path, enhanced_vocal_path)
-        if not success:
-            log("[WARN] Enhancement failed, falling back to raw separated vocals.")
+        vocal_path = None
+        instrumental_path = None
+
+        _emit("separation", 0.0)
+        log(f"[1/6] Running Separation Models...")
+        
+        vocal_path = None
+        instrumental_path = None
+        
+        # Define final target paths immediately
+        final_vocal = song_dir / "vocals.wav"
+        final_inst = song_dir / "instrumental.wav"
+
+        # 1. Instrumental (Mel-Band Roformer Inst) - Run FIRST as requested
+        log(f"  > Separating Instrumental with {self.instrumental_model}...")
+        i_path = self.separator.separate_instrumental(str(audio_path), str(song_dir), model_name=self.instrumental_model)
+        
+        if i_path:
+            # Immediately move to final location to prevent overwrite by step 2
+            if final_inst.exists():
+                try: os.remove(final_inst)
+                except: pass
+            
+            try:
+                Path(i_path).rename(final_inst)
+                instrumental_path = str(final_inst)
+            except Exception as e:
+                log(f"[WARN] Failed to rename instrumental: {e}")
+                instrumental_path = i_path # Fallback
+
+        # 2. Vocals (BS-Roformer / Karaoke Model)
+        log(f"  > Separating Vocals with {self.karaoke_model}...")
+        
+        bs_roformer_used = "bs_roformer" in self.karaoke_model or "6-stem" in self.karaoke_model
+        
+        if bs_roformer_used:
+            # separate_vocals returns (vocals, instrumental_mix)
+            # We only want the vocals. The instrumental_mix is inferior to the dedicated model above.
+            v_path, v_inst_mix = self.separator.separate_vocals(str(audio_path), str(song_dir))
+            
+            # Since we want to safeguard our vocals, move them to final immediately too
+            if v_path:
+                if final_vocal.exists():
+                    try: os.remove(final_vocal)
+                    except: pass
+                Path(v_path).rename(final_vocal)
+                vocal_path = str(final_vocal)
+            
+            # CLEANUP: Remove the combined instrumental track from BS-Roformer if it exists
+            # This is CRITICAL because separate_vocals writes to {fname}_instrumental.wav,
+            # which would have overwritten our good instrumental if we hadn't moved it.
+            if v_inst_mix and os.path.exists(v_inst_mix):
+                try:
+                    os.remove(v_inst_mix)
+                    log(f"  > Removed inferior instrumental mix: {Path(v_inst_mix).name}")
+                except Exception as e:
+                    log(f"[WARN] Failed to remove mixed instrumental: {e}")
+
+            # CLEANUP: Remove other stems (drums, bass, etc) if they were generated
+            for stem in ["drums", "bass", "other", "guitar", "piano"]:
+                potential_stem = song_dir / f"{audio_path.stem}_{stem}.wav"
+                if potential_stem.exists():
+                    try:
+                        os.remove(potential_stem)
+                    except: pass
+
+        else:
+            # 2-stem model
+            v_path, i_run_path = self.separator.separate_karaoke(str(audio_path), str(song_dir), model_name=self.karaoke_model)
+            
+            if v_path:
+                if final_vocal.exists():
+                    try: os.remove(final_vocal)
+                    except: pass
+                Path(v_path).rename(final_vocal)
+                vocal_path = str(final_vocal)
+                
+            # If we didn't get an instrumental from step 1 (failed?), take this one? 
+            # Or if user didn't want dual model? 
+            # Current logic assumes Step 1 always runs. 
+            # But separate_karaoke also outputs an instrumental.
+            if not instrumental_path and i_run_path:
+                 if final_inst.exists():
+                    try: os.remove(final_inst)
+                    except: pass
+                 Path(i_run_path).rename(final_inst)
+                 instrumental_path = str(final_inst)
+            elif i_run_path and os.path.exists(i_run_path):
+                 # We have a better instrumental already, kill this one
+                 try: os.remove(i_run_path)
+                 except: pass
+
+        _emit("separation", 1.0)
+        
+        # Rename logic moved up, so we just check if we have paths now
+        if not vocal_path:
+             log("[ERR] Separation produced no vocal track.")
+             return {}
+
+        # --- 2. Dereverb Vocals (internal use for ASR/Pitch) ---
+        _emit("enhancement", 0.0)
+        log(f"[2/6] Dereverbing vocals with {self.dereverb_model} (for processing)")
+        
+        # We perform dereverb on the separated vocals
+        dereverbed_path = self.separator.separate_dereverb(
+            vocal_path,
+            str(song_dir),
+            model_name=self.dereverb_model
+        )
+
+        if not dereverbed_path:
+            log("[WARN] Dereverb failed, falling back to raw separated vocals.")
             enhanced_vocal_path = vocal_path
+        else:
+            enhanced_vocal_path = dereverbed_path
+
         _emit("enhancement", 1.0)
 
         # --- 3. Transcribe with Whisper (segments + words) ---
         _emit("transcription", 0.0)
-        log(f"[3/5] Transcribing with Whisper ({self.transcriber.model_size})")
+        log(f"[3/6] Transcribing with Whisper ({self.transcriber.model_size})")
         # Use enhanced vocals for transcription
         whisper_text, metadata = self.transcriber.transcribe(enhanced_vocal_path)
         _emit("transcription", 1.0)
@@ -131,7 +232,7 @@ class KaraokePipeline:
 
         # --- 4. Word-level timestamps from Whisper ---
         _emit("alignment", 0.0)
-        log("[4/5] Extracting word-level timestamps from Whisper")
+        log("[4/6] Extracting word-level timestamps from Whisper")
 
         lang_detected = metadata.get("language", "ja")
         lang_map = {"ja": "Japanese", "en": "English", "zh": "Chinese"}
@@ -144,22 +245,43 @@ class KaraokePipeline:
 
         # --- 5. Pitch extraction (FCPE) ---
         _emit("pitch", 0.0)
-        log("[5/5] Extracting pitch curve (FCPE)")
+        log("[5/6] Extracting pitch curve (FCPE)")
         # Use enhanced vocals for pitch extraction
         pitch_data = self.pitch_extractor.extract(enhanced_vocal_path)
         _emit("pitch", 1.0)
 
-        # --- 5. Build structured karaoke output ---
+        # --- 6. Convert to OGG for Godot Runtime ---
+        _emit("conversion", 0.0)
+        log("[6/6] Converting to OGG (for Godot runtime loading)")
+        
+        vocal_ogg = song_dir / "vocals.ogg"
+        inst_ogg = song_dir / "instrumental.ogg"
+        
+        if vocal_path and os.path.exists(vocal_path):
+            self.converter.convert(vocal_path, str(vocal_ogg), format="ogg")
+            # Cleanup source wav
+            try: os.remove(vocal_path)
+            except: pass
+            vocal_path = str(vocal_ogg)
+            
+        if instrumental_path and os.path.exists(instrumental_path):
+            self.converter.convert(instrumental_path, str(inst_ogg), format="ogg")
+            # Cleanup source wav
+            try: os.remove(instrumental_path)
+            except: pass
+            instrumental_path = str(inst_ogg)
+            
+        _emit("conversion", 1.0)
+
+        # --- 6. Build structured karaoke output ---
         lines = self._build_lines(metadata.get("segments", []))
         words = self._assign_words_to_lines(aligned_words, lines)
 
         # Build sparse pitch events (decoupled from word timing)
         # Each event = {time, midi, note} at ~100ms intervals, voiced only.
-        # Game looks up target pitch by timestamp — no dependency on word boundaries.
-        # Trim pitch to the range of the lyrics (±1s buffer) to avoid intro/outro noise.
         first_word_time = min(w["start"] for w in words) if words else 0
         last_word_time = max(w["end"] for w in words) if words else 0
-        
+
         pitch_events = build_sparse_pitch(
             pitch_data["midi_clean"],
             pitch_data["voiced"],
@@ -178,8 +300,8 @@ class KaraokePipeline:
             },
             "audio": {
                 "original": audio_path.name,
-                "vocals": "vocals.wav" if vocal_path else None,
-                "instrumental": "instrumental.wav" if instrumental_path else None,
+                "vocals": "vocals.ogg" if vocal_path else None,
+                "instrumental": "instrumental.ogg" if instrumental_path else None,
             },
             "lines": lines,
             "words": words,

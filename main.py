@@ -129,7 +129,11 @@ def cmd_stems(args):
 
 def cmd_karaoke(args):
     log(f"[CMD] Starting Karaoke Pipeline for {args.input}")
-    pipeline = KaraokePipeline(device=args.device)
+    pipeline = KaraokePipeline(
+        device=args.device,
+        karaoke_model=args.karaoke_model,
+        dereverb_model=args.dereverb_model
+    )
     result = pipeline.process_song(args.input, args.output_dir)
     if not result:
         _emit_result({"status": "error", "message": "Karaoke pipeline failed."})
@@ -193,6 +197,9 @@ def main():
     p_kara = subparsers.add_parser("karaoke", parents=[gen_parser], help="Karaoke Pipeline (Sep -> Whisper -> FCPE)")
     p_kara.add_argument("input", help="Input file")
     p_kara.add_argument("output_dir", help="Output directory")
+    p_kara.add_argument("--karaoke-model", default="model_bs_roformer_ep_317_sdr_12.9755.ckpt", help="Karaoke separation model (Vocals)")
+    p_kara.add_argument("--instrumental-model", default="melband_roformer_inst_v1e.ckpt", help="Instrumental separation model")
+    p_kara.add_argument("--dereverb-model", default="dereverb_mel_band_roformer_anvuew_sdr_19.1729.ckpt", help="Dereverb model (for ASR)")
     p_kara.set_defaults(func=cmd_karaoke)
 
     args = parser.parse_args()
